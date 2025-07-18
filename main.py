@@ -6,8 +6,14 @@ import things
 load_dotenv()
 
 
+# def get_all_things_tasks():
+#     return list(things.tasks())
+
 def get_all_things_tasks():
-    return list(things.tasks())
+    all_tasks = []
+    for status in ["incomplete", "completed", "canceled"]:
+        all_tasks.extend(list(things.tasks(status=status)))
+    return all_tasks
 
 
 def get_things_todos(all_tasks):
@@ -38,12 +44,12 @@ def get_task_display_date(task):
     for field in ["start_date", "deadline"]:
         value = task.get(field)
         if value and value != "None":
+            print(f"DEBUG: Task '{task.get('title')}' has {field}: {value} (type: {type(value)})")
             return value
     return None
 
 
 def fetch_project_id_map(notion, projects_db_id):
-    # {name: id}
     project_map = {}
     results = []
     start_cursor = None
@@ -123,6 +129,36 @@ def build_notion_uuid_map(notion, database_id):
     return uuid_map
 
 
+def things_status_to_notion_status(things_status):
+    # Map Things status to Notion status string
+    # You can extend this function for more statuses as needed
+    if things_status == "completed":
+        return "Completed"
+    elif things_status == "canceled":
+        return "Canceled"
+    elif things_status == "incomplete":
+        return "Incomplete"
+    else:
+        return "Incomplete"  # fallback
+
+
+def extract_date_part(date_string):
+    """Extract just the date part from a date string, ignoring time"""
+    if not date_string:
+        return None
+    
+    # Handle ISO 8601 format from Notion (e.g. "2025-07-18T21:30:00.000+09:30")
+    if 'T' in date_string:
+        return date_string.split('T')[0]
+    
+    # Handle space-separated format (e.g. "2025-07-18 21:30:00")
+    if ' ' in date_string:
+        return date_string.split()[0]
+    
+    # Return as-is if it's just a date
+    return date_string
+
+
 def properties_differ(task, notion_page, project_id, date_value):
     props = notion_page["properties"]
 
@@ -131,9 +167,11 @@ def properties_differ(task, notion_page, project_id, date_value):
     if task["title"] != notion_title:
         return True
 
-    # Status/checkbox
-    notion_status = props["Status"]["checkbox"]
-    things_status = task.get("status") == "complete"
+    # Status/select (safe access)
+    status_prop = props.get("Status", {})
+    status_value = status_prop.get("status")
+    notion_status = status_value.get("name") if status_value else None
+    things_status = things_status_to_notion_status(task.get("status"))
     if notion_status != things_status:
         return True
 
@@ -143,19 +181,26 @@ def properties_differ(task, notion_page, project_id, date_value):
     if (project_id or notion_project_id) and (project_id != notion_project_id):
         return True
 
-    # Date
+    # Date - only trigger update if date parts are different
     notion_date = props.get("Date", {}).get("date", {})
     notion_date_value = notion_date.get("start") if notion_date else None
-    if (date_value or notion_date_value) and (date_value != notion_date_value):
+
+    things_date_part = extract_date_part(date_value)
+    notion_date_part = extract_date_part(notion_date_value)
+    print(
+        f"Comparing dates: Things: {notion_title} {things_date_part}, Notion: {notion_date_part} (full: {notion_date_value})")
+
+    # Only consider it different if date parts actually differ
+    if (things_date_part or notion_date_part) and (things_date_part != notion_date_part):
         return True
 
     return False
 
 
-def task_properties_dict(task, heading_lookup, project_id_map, notion, projects_db_id):
+def task_properties_dict(task, heading_lookup, project_id_map, notion, projects_db_id, existing_page=None):
     props = {
         "Name": {"title": [{"text": {"content": task["title"]}}]},
-        "Status": {"checkbox": task.get("status") == "complete"},
+        "Status": {"status": {"name": things_status_to_notion_status(task.get("status"))}},
         "Things UUID": {"rich_text": [{"text": {"content": task["uuid"]}}]}
     }
     project_name = get_task_project(task, heading_lookup)
@@ -163,15 +208,32 @@ def task_properties_dict(task, heading_lookup, project_id_map, notion, projects_
         project_name, project_id_map, notion, projects_db_id)
     if project_id:
         props["Projects"] = {"relation": [{"id": project_id}]}
+
     date_value = get_task_display_date(task)
     if date_value:
-        props["Date"] = {"date": {"start": date_value}}
+        # If updating existing page, check if dates match
+        if existing_page:
+            existing_props = existing_page["properties"]
+            existing_date = existing_props.get("Date", {}).get("date", {})
+            existing_date_value = existing_date.get(
+                "start") if existing_date else None
+
+            # If dates match (same date part), don't update the date at all
+            if (existing_date_value and
+                    extract_date_part(date_value) == extract_date_part(existing_date_value)):
+                # Don't add Date to props - keep existing date/time as is
+                pass
+            else:
+                props["Date"] = {"date": {"start": date_value}}
+        else:
+            props["Date"] = {"date": {"start": date_value}}
+
     return props, project_id, date_value
 
 
 def add_or_update_task_to_notion(notion, database_id, task, heading_lookup, project_id_map, projects_db_id, existing_page):
     props, project_id, date_value = task_properties_dict(
-        task, heading_lookup, project_id_map, notion, projects_db_id)
+        task, heading_lookup, project_id_map, notion, projects_db_id, existing_page)
 
     if existing_page:
         if properties_differ(task, existing_page, project_id, date_value):
@@ -185,9 +247,9 @@ def add_or_update_task_to_notion(notion, database_id, task, heading_lookup, proj
         print(f"Created: {task['title']}")
 
 
-def delete_task_in_notion(notion, page_id):
-    notion.pages.update(page_id=page_id, archived=True)
-    print(f"Deleted (archived) Notion task {page_id}")
+# def delete_task_in_notion(notion, page_id):
+#     notion.pages.update(page_id=page_id, archived=True)
+#     print(f"Deleted (archived) Notion task {page_id}")
 
 
 def sync_things_to_notion():
@@ -205,7 +267,6 @@ def sync_things_to_notion():
 
     # UUID sets for deletes
     things_uuid_set = set(task["uuid"] for task in tasks)
-    notion_uuids = set(notion_uuid_map.keys())
 
     # Add or update tasks
     for task in tasks:
@@ -216,10 +277,10 @@ def sync_things_to_notion():
             existing_page=page
         )
 
-    # Delete Notion tasks not found in Things anymore
-    for uuid, page in notion_uuid_map.items():
-        if uuid not in things_uuid_set:
-            delete_task_in_notion(notion, page["id"])
+    # # Delete Notion tasks not found in Things anymore
+    # for uuid, page in notion_uuid_map.items():
+    #     if uuid not in things_uuid_set:
+    #         delete_task_in_notion(notion, page["id"])
 
 
 if __name__ == "__main__":
