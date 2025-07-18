@@ -1,7 +1,12 @@
 import os
+import json
+import argparse
+import subprocess
 from dotenv import load_dotenv
 from notion_client import Client
 import things
+from datetime import datetime, timedelta
+from pathlib import Path
 
 load_dotenv()
 
@@ -41,12 +46,27 @@ def get_task_project(task, heading_lookup):
 
 
 def get_task_display_date(task):
+    # First check if task has any actual dates assigned
+    actual_date = None
     for field in ["start_date", "deadline"]:
         value = task.get(field)
         if value and value != "None":
-            print(f"DEBUG: Task '{task.get('title')}' has {field}: {value} (type: {type(value)})")
-            return value
-    return None
+            actual_date = value
+            break
+    
+    # If no actual date is assigned, return None (keep Notion date blank)
+    if not actual_date:
+        return None
+    
+    # If task has a date AND is in Today list, use today's date (for overdue tasks)
+    today_index = task.get('today_index')
+    if today_index is not None:
+        # Task is in Today list and has an actual date, use today's date
+        today = datetime.now().strftime('%Y-%m-%d')
+        return today
+    
+    # Otherwise use the actual scheduled date
+    return actual_date
 
 
 def fetch_project_id_map(notion, projects_db_id):
@@ -187,11 +207,12 @@ def properties_differ(task, notion_page, project_id, date_value):
 
     things_date_part = extract_date_part(date_value)
     notion_date_part = extract_date_part(notion_date_value)
-    print(
-        f"Comparing dates: Things: {notion_title} {things_date_part}, Notion: {notion_date_part} (full: {notion_date_value})")
 
     # Only consider it different if date parts actually differ
-    if (things_date_part or notion_date_part) and (things_date_part != notion_date_part):
+    # Special case: if Things has no date but Notion has a date, we need to clear it
+    if things_date_part is None and notion_date_part is not None:
+        return True
+    elif (things_date_part or notion_date_part) and (things_date_part != notion_date_part):
         return True
 
     return False
@@ -227,6 +248,9 @@ def task_properties_dict(task, heading_lookup, project_id_map, notion, projects_
                 props["Date"] = {"date": {"start": date_value}}
         else:
             props["Date"] = {"date": {"start": date_value}}
+    else:
+        # Task has no date, clear the date in Notion
+        props["Date"] = {"date": None}
 
     return props, project_id, date_value
 
